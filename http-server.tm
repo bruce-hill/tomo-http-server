@@ -17,35 +17,33 @@ use ./connection-queue.tm
 
 func serve(port:Int32, handler:func(request:HTTPRequest -> HTTPResponse), num_threads=16)
     connections := ConnectionQueue()
-    workers : &[@pthread_t]
+    workers : &[PThread]
     for i in num_threads
-        workers.insert(pthread_t.new(func()
+        workers.insert(PThread.new(func()
             repeat
                 connection := connections.dequeue()
-                request_text := C_code:Text(
-                    Text_t request = EMPTY_TEXT;
+                request_text := ""
+                C_code`
                     char buf[1024] = {};
                     for (ssize_t n; (n = read(@connection, buf, sizeof(buf) - 1)) > 0; ) {
                         buf[n] = 0;
-                        request = Text$concat(request, Text$from_strn(buf, n));
-                        if (request.length > 1000000 || strstr(buf, "\r\n\r\n"))
+                        @request_text = Text$concat(@request_text, Text$from_strn(buf, n));
+                        if (@request_text.length > 1000000 || strstr(buf, "\\r\\n\\r\\n"))
                             break;
                     }
-                    request
-                )
-
+                `
                 request := HTTPRequest.from_text(request_text) or skip
                 response := handler(request).bytes()
-                C_code {
+                C_code `
                     if (@response.stride != 1)
                         List$compact(&@response, 1);
                     write(@connection, @response.data, @response.length);
                     close(@connection);
-                }
+                `
         ))
 
 
-    sock := C_code:Int32(
+    sock := C_code:Int32`
         int s = socket(AF_INET, SOCK_STREAM, 0);
         if (s < 0) err(1, "Couldn't connect to socket!");
 
@@ -60,10 +58,10 @@ func serve(port:Int32, handler:func(request:HTTPRequest -> HTTPResponse), num_th
             err(1, "Couldn't listen on socket");
 
         s
-    )
+    `
 
     repeat
-        conn := C_code:Int32(accept(@sock, NULL, NULL))
+        conn := C_code:Int32`accept(@sock, NULL, NULL)`
         stop if conn < 0 
         connections.enqueue(conn)
 
@@ -73,18 +71,18 @@ func serve(port:Int32, handler:func(request:HTTPRequest -> HTTPResponse), num_th
 
 struct HTTPRequest(method:Text, path:Text, version:Text, headers:[Text], body:Text)
     func from_text(text:Text -> HTTPRequest?)
-        m := text.pattern_captures($Pat'{word} {..} HTTP/{..}{crlf}{..}') or return none
-        method := m[1]
-        path := m[2].replace_pattern($Pat'{2+ /}', '/')
-        version := m[3]
-        rest := m[-1].pattern_captures($Pat/{..}{2 crlf}{0+ ..}/) or return none
-        headers := rest[1].split_pattern($Pat/{crlf}/)
-        body := rest[-1]
+        m := $Pat'{word} {..} HTTP/{..}{crlf}{..}'.match(text) or return none
+        method := m.captures[1]!
+        path := $Pat'{2+ /}'.replace(m.captures[2]!, '/')
+        version := m.captures[3]!
+        rest := $Pat'{..}{2 crlf}{0+ ..}'.match(m.captures[-1]!) or return none
+        headers := $Pat'{crlf}'.split(rest.captures[1]!)
+        body := rest.captures[-1]!
         return HTTPRequest(method, path, version, headers, body)
 
-struct HTTPResponse(body:Text, status=200, content_type="text/plain", headers:{Text=Text}={})
+struct HTTPResponse(body:Text, status=200, content_type="text/plain", headers:{Text:Text}={})
     func bytes(r:HTTPResponse -> [Byte])
-        body_bytes := r.body.bytes()
+        body_bytes := r.body.utf8()
         extra_headers := (++: "$k: $v\r\n" for k,v in r.headers) or ""
         return "
             HTTP/1.1 $(r.status) OK\r
@@ -93,7 +91,7 @@ struct HTTPResponse(body:Text, status=200, content_type="text/plain", headers:{T
             Connection: close\r
             $extra_headers
             \r\n
-        ".bytes() ++ body_bytes
+        ".utf8() ++ body_bytes
 
 func _content_type(file:Path -> Text)
     when file.extension() is "html" return "text/html"
@@ -104,17 +102,17 @@ func _content_type(file:Path -> Text)
 
 enum RouteEntry(ServeFile(file:Path), Redirect(destination:Text))
     func respond(entry:RouteEntry, request:HTTPRequest -> HTTPResponse)
-        when entry is ServeFile(file)
-            body := if file.can_execute()
-                Command(Text(file)).get_output()!
+        when entry is ServeFile(f)
+            body := if f.can_execute()
+                Command(Text(f)).get_output()!
             else
-                file.read()!
-            return HTTPResponse(body, content_type=_content_type(file))
+                f.read()!
+            return HTTPResponse(body, content_type=_content_type(f))
         is Redirect(destination)
-            return HTTPResponse("Found", 302, headers={"Location"=destination})
+            return HTTPResponse("Found", 302, headers={"Location":destination})
 
-func load_routes(directory:Path -> {Text=RouteEntry})
-    routes : &{Text=RouteEntry}
+func load_routes(directory:Path -> {Text:RouteEntry})
+    routes : &{Text:RouteEntry}
     for file in (directory ++ (./*)).glob()
         skip unless file.is_file()
         contents := file.read() or skip
