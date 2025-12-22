@@ -115,8 +115,7 @@ func load_routes(directory:Path -> {Text:RouteEntry})
     routes : &{Text:RouteEntry}
     for file in (directory ++ (./*)).glob()
         skip unless file.is_file()
-        contents := file.read() or skip
-        server_path := "/" ++ "/".join(file.relative_to(directory).components)
+        server_path := "/" ++ "/".join(file.relative_to(directory).components())
         if file.base_name() == "index.html"
             canonical := server_path.without_suffix("index.html")
             routes[server_path] = Redirect(canonical)
